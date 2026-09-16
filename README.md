@@ -80,3 +80,10 @@ _The data was derived via exclusion method of running different stages of the to
 
 ## AI Disclaimer
 This project has been co-authored by Claude Fable 5.1 by Anthropic <noreply@anthropic.com>.
+
+----
+
+**License Scope and clarification**
+
+- The final binary includes transformer models from several companies. The license for this repository does not apply to the model files and the models themselves are not included in the repository.
+- The icon for the binary and extension are part of [svgrepo.com](svgrepo.com) repository and the license for this repository does not apply to them. The files are included in the repository.

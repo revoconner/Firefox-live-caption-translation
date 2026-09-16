@@ -52,7 +52,7 @@ Pipeline:
 4. Backend pushes caption events (partial, live_translation, final with optional replaces, translation) to the extension over a WebSocket on 127.0.0.1:8765. The extension sends `config` with the live translation toggle.
 5. Extension overlays captions on the largest playing unmuted video of the streaming tab.
 
-Run the backend with `capvenv\Scripts\python.exe backend\service.py`. Flags: `--port`, `--eou-ms`, `--right-context`, `--unload-grace`, `--watch-interval`, `--keep-loaded`.
+Run the backend with `capvenv\Scripts\python.exe backend\service.py`. Flags: `--port`, `--home`, `--device auto|gpu|cpu`, `--log-dir`, `--no-tray`, `--quit`, `--eou-ms`, `--right-context`, `--unload-grace`, `--watch-interval`, `--keep-loaded`. It shows a notification area icon (status, log folder, Quit) and writes a rotating log to `%LocalAppData%\LiveCaptionTranslate\logs\service.log`; a second instance exits quietly when the port is taken.
 
 Model lifetime (decided 16 Sep 2026): the models are loaded while `firefox.exe` is running and unloaded after it has been gone for the grace period (20 s default), decided by a watcher thread polling the process list. Rev chose this over load on activate and unload on idle because the loaded but idle cost is only VRAM and reloading on every activation would add latency. An activate that arrives before the watcher has loaded loads the models itself. Unload waits for any in flight translation. Verified: 5.1 GB of VRAM taken while Firefox runs, released to about 0.4 GB (the CUDA context, freed only at process exit) after it closes, and reloaded within the poll interval when it returns.
 
@@ -128,8 +128,15 @@ Model lifetime (decided 16 Sep 2026): the models are loaded while `firefox.exe` 
 
 Model files live in `backend\models`: `nemotron-3.5-asr-streaming-0.6b.q8_0.gguf` (ASR) and `riva-translate-4b-instruct-v2-q8_0.gguf` (NMT, community q8_0 conversion, verified runtime_compatible by `nemo-speech model info`). The `.nemo` archive there is not used by the runtime.
 
-## Packaging (decided 16 Sep 2026, not built yet)
-The installer covers the backend only: Python runtime, backend code, capture helper, nemo-speech runtime DLLs and licenses, the two models, and an autostart entry. The extension is not part of it; Rev will publish it on addons.mozilla.org separately. The assessment with the required code changes (path resolution from an application root, `--device auto` with CPU fallback, quiet exit on a taken port, file logging, a way to quit, an Inno Setup script) is in SCRATCHPAD.md under the packaging heading. Inno Setup 6 is installed on this machine; bundle the embeddable Python rather than PyInstaller.
+## Packaging (decided 16 Sep 2026, installer not written yet)
+The installer covers the backend only: the PyInstaller build, the nemo-speech runtime DLLs and licenses, proc_loopback.exe, the two models, and an autostart entry. The extension is not part of it; Rev will publish it on addons.mozilla.org separately.
+
+- Rev installed PyInstaller 6.22 into capvenv and chose it over the embeddable Python. The spec is `packaging\LiveCaptionTranslate.spec` (onedir, windowed, icon `backend\icon.ico`). `packaging\build.ps1` builds proc_loopback.exe if missing, runs PyInstaller into `packaging\dist\LiveCaptionTranslate` and then Inno Setup on `packaging\installer.iss` once that file exists. `packaging\build`, `dist` and `out` are git ignored.
+- The dist folder is self contained and portable (decided by Rev 16 Sep 2026): the spec copies the nemo-speech `bin`, the two GGUFs into `models`, proc_loopback.exe into `native` and the runtime licenses into `licenses`, all inside `_internal`, so a zip of the dist folder runs anywhere and the installer ships the dist folder wholesale. About 5.1 GB.
+- Application home: `_internal` in the build, the `backend` folder in the dev checkout. It holds `bin`, `models` and `native`. `LCT_HOME` or `--home` overrides it; a home without `bin` (the dev checkout) falls back to the developer install in `C:\PortableProgs`.
+- `backend\tray.py` is the notification area icon, written against the Win32 API with ctypes so there is no pystray or Pillow dependency. Quit goes through the same path as `--quit`, which sends `{"type": "quit"}` over the WebSocket.
+- `--device auto` retries model creation on the CPU when the GPU attempt fails. Rev considers this unnecessary for the target machine; it stays because it is a few lines. Untested on a machine without an NVIDIA card.
+- Inno Setup 6 is installed on this machine (`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`). The GGUFs go in with `Flags: nocompression`. Build notes and verification are in SCRATCHPAD.md.
 
 ## Python backend dependencies
 Listed in `requirements.txt` at the project root. Kept minimal on purpose: websockets, httpx, numpy, psutil, pytest for tests. No torch, no NeMo toolkit. Anything ML related is served by nemo-speech or a llama.cpp server as a separate process.

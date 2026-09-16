@@ -15,10 +15,20 @@ _asr: C.CDLL | None = None
 _nmt: C.CDLL | None = None
 
 
-def load(bin_dir: Path = DEFAULT_BIN) -> None:
+def resolve_bin(home: Path | None = None) -> Path:
+    """The runtime DLL folder: `bin` under the application home when it holds the runtime, else the developer install."""
+    if home is not None and (home / "bin" / "nemo_speech_asr_c.dll").is_file():
+        return home / "bin"
+    return DEFAULT_BIN
+
+
+def load(bin_dir: Path | None = None) -> None:
     global _asr, _nmt
     if _asr is not None:
         return
+    bin_dir = bin_dir or DEFAULT_BIN
+    if not (bin_dir / "nemo_speech_asr_c.dll").is_file():
+        raise NemoError(f"nemo-speech runtime not found in {bin_dir}")
     os.add_dll_directory(str(bin_dir))
     _asr = C.CDLL(str(bin_dir / "nemo_speech_asr_c.dll"))
     _nmt = C.CDLL(str(bin_dir / "nemo_speech_nmt_c.dll"))

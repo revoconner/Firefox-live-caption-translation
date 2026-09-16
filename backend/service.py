@@ -1,11 +1,11 @@
 """Live caption backend: captures Firefox playback audio, runs streaming ASR with language detection, translates non English finals, and streams caption events to the extension over a local WebSocket.
 
-Run: capvenv\\Scripts\\python.exe backend\\service.py [--port 8765] [--eou-ms 800] [--right-context 1] [--unload-grace 20] [--keep-loaded]
+Run: capvenv\\Scripts\\python.exe backend\\service.py [--port 8765] [--device auto|gpu|cpu] [--home DIR] [--no-tray] [--quit] (see --help for the rest)
 
 The models are loaded while firefox.exe is running and unloaded after it has been gone for the grace period, so a backend started at login costs nothing until Firefox appears.
 
 Protocol (JSON text frames, one object per frame):
-  client -> server: {"type": "activate"} | {"type": "deactivate"} | {"type": "ping"}
+  client -> server: {"type": "activate"} | {"type": "deactivate"} | {"type": "ping"} | {"type": "quit"}
   server -> client: {"type": "status", "state": "idle|capturing|error", "detail": str}
                     {"type": "partial", "text": str}
                     {"type": "final", "id": int, "text": str, "lang": str, "needs_translation": bool}
@@ -17,11 +17,13 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import numpy as np
@@ -29,16 +31,34 @@ import psutil
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+FROZEN = bool(getattr(sys, "frozen", False))  # running as the PyInstaller build
+ROOT = Path(sys._MEIPASS) if FROZEN else Path(__file__).resolve().parent  # _internal next to the exe, or the backend folder
+sys.path.insert(0, str(ROOT))
 import nemo_ffi  # noqa: E402
+import tray  # noqa: E402
 
+__version__ = "0.1.0"
 log = logging.getLogger("captions")
 
-ROOT = Path(__file__).resolve().parent
+# The application home holds bin (nemo-speech runtime), models and native (proc_loopback.exe). It is _internal in the PyInstaller build, or the backend folder in the dev checkout, and can be pointed elsewhere with LCT_HOME or --home. A home without bin falls back to the developer install of the runtime.
+HOME = ROOT
 MODELS = ROOT / "models"
 ASR_MODEL = MODELS / "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
 NMT_MODEL = MODELS / "riva-translate-4b-instruct-v2-q8_0.gguf"
 CAPTURE_EXE = ROOT / "native" / "proc_loopback.exe"
+
+
+def set_home(home: Path) -> None:
+    global HOME, MODELS, ASR_MODEL, NMT_MODEL, CAPTURE_EXE
+    HOME = home.resolve()
+    MODELS = HOME / "models"
+    ASR_MODEL = MODELS / "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
+    NMT_MODEL = MODELS / "riva-translate-4b-instruct-v2-q8_0.gguf"
+    CAPTURE_EXE = HOME / "native" / "proc_loopback.exe"
+
+
+def default_log_dir() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", str(ROOT))) / "LiveCaptionTranslate" / "logs"
 RATE = 16000
 CHUNK_MS = 80
 CHUNK_BYTES = RATE * CHUNK_MS // 1000 * 2
@@ -210,11 +230,13 @@ def firefox_root_pid() -> int | None:
 class Engine:
     """Owns the ASR recognizer, the NMT translator, the capture subprocess and the ASR thread."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, events: asyncio.Queue, right_context: int, eou_ms: int, unload_grace: float = 20.0, watch_interval: float = 5.0, keep_loaded: bool = False) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, events: asyncio.Queue, right_context: int, eou_ms: int, unload_grace: float = 20.0, watch_interval: float = 5.0, keep_loaded: bool = False, device: str = "auto") -> None:
         self.loop = loop
         self.events = events
         self.right_context = right_context
         self.eou_ms = eou_ms
+        self.device = device  # auto, gpu or cpu
+        self.on_status = None  # optional callback receiving a one line state for the tray tooltip
         self.unload_grace = unload_grace
         self.watch_interval = watch_interval
         self.keep_loaded = keep_loaded
@@ -257,10 +279,23 @@ class Engine:
             return
         t = time.perf_counter()
         self.emit({"type": "status", "state": "loading", "detail": "loading models"})
-        rec = nemo_ffi.Recognizer(ASR_MODEL, rnnt_right_context=self.right_context, endpointing=True, eou_ms=self.eou_ms)
-        self.nmt = nemo_ffi.Translator(NMT_MODEL)
+        nemo_ffi.load(nemo_ffi.resolve_bin(HOME))
+        rec = self._create(lambda gpu: nemo_ffi.Recognizer(ASR_MODEL, gpu=gpu, rnnt_right_context=self.right_context, endpointing=True, eou_ms=self.eou_ms))
+        self.nmt = self._create(lambda gpu: nemo_ffi.Translator(NMT_MODEL, gpu=gpu))
         self.rec = rec  # assigned last so `loaded` only turns true once both models are in
         log.info("models loaded in %.1fs", time.perf_counter() - t)
+
+    def _create(self, factory):
+        """Build a model on the chosen device. With auto, a GPU failure (no NVIDIA card or driver, no free VRAM) retries on the CPU."""
+        if self.device == "cpu":
+            return factory(-1)
+        try:
+            return factory(0)
+        except nemo_ffi.NemoError as e:
+            if self.device != "auto":
+                raise
+            log.warning("gpu model creation failed (%s), retrying on cpu", e)
+            return factory(-1)
         self.emit({"type": "status", "state": "idle", "detail": "models loaded"})
 
     def _unload(self) -> bool:
@@ -318,6 +353,8 @@ class Engine:
 
     def emit(self, msg: dict) -> None:
         self.loop.call_soon_threadsafe(self.events.put_nowait, msg)
+        if msg.get("type") == "status" and self.on_status:
+            self.on_status(f'{msg["state"]}: {msg.get("detail", "")}')
 
     def start(self) -> None:
         with self.lock:
@@ -336,7 +373,7 @@ class Engine:
             self.emit({"type": "status", "state": "error", "detail": "firefox.exe not found"})
             return
         self._load()  # no-op once the watcher has done it; covers an activate that beats the watcher
-        self.proc = subprocess.Popen([str(CAPTURE_EXE), "--pid", str(pid), "--rate", str(RATE)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        self.proc = subprocess.Popen([str(CAPTURE_EXE), "--pid", str(pid), "--rate", str(RATE)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, creationflags=subprocess.CREATE_NO_WINDOW)
         self.stop_flag.clear()
         self.last_lang = ""
         self.open_fragment = None
@@ -555,9 +592,10 @@ class Engine:
 
 
 class Server:
-    def __init__(self, engine: Engine, events: asyncio.Queue) -> None:
+    def __init__(self, engine: Engine, events: asyncio.Queue, stop: asyncio.Event) -> None:
         self.engine = engine
         self.events = events
+        self.stop = stop
         self.clients: set[ServerConnection] = set()
         self.active_clients: set[ServerConnection] = set()
 
@@ -597,6 +635,9 @@ class Server:
                     if "live_translation" in msg:
                         self.engine.live_translation = bool(msg["live_translation"])
                         log.info("live translation %s", "on" if self.engine.live_translation else "off")
+                elif kind == "quit":  # only local processes can connect, so this is the --quit flag or a tool
+                    log.info("quit requested by a client")
+                    self.stop.set()
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -609,26 +650,90 @@ class Server:
 async def main_async(a: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
     events: asyncio.Queue = asyncio.Queue()
-    engine = Engine(loop, events, a.right_context, a.eou_ms, unload_grace=a.unload_grace, watch_interval=a.watch_interval, keep_loaded=a.keep_loaded)
-    server = Server(engine, events)
-    async with serve(server.handler, "127.0.0.1", a.port, max_size=1 << 20):
-        log.info("listening on ws://127.0.0.1:%d", a.port)
+    stop = asyncio.Event()
+    engine = Engine(loop, events, a.right_context, a.eou_ms, unload_grace=a.unload_grace, watch_interval=a.watch_interval, keep_loaded=a.keep_loaded, device=a.device)
+    server = Server(engine, events, stop)
+    try:
+        ws_server = await serve(server.handler, "127.0.0.1", a.port, max_size=1 << 20)
+    except OSError as e:
+        log.info("port %d is taken, another instance is probably running: %s", a.port, e)
+        engine.close()
+        return
+    icon = None
+    if not a.no_tray:
+        icon_path = ROOT / "icon.ico"
+        icon = tray.TrayIcon(f"Live Caption Translate {__version__}", icon_path, on_quit=lambda: loop.call_soon_threadsafe(stop.set), log_dir=a.log_dir)
+        engine.on_status = icon.set_status
+        icon.start()
+        icon.set_status("waiting for firefox")
+    log.info("listening on ws://127.0.0.1:%d", a.port)
+    pump = asyncio.create_task(server.broadcast())
+    try:
+        await stop.wait()
+    finally:
+        pump.cancel()
+        ws_server.close()
         try:
-            await server.broadcast()
-        finally:
-            engine.close()
+            await asyncio.wait_for(ws_server.wait_closed(), 5)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        engine.close()
+        if icon:
+            icon.stop()
+        log.info("stopped")
+
+
+def send_quit(port: int) -> int:
+    """Ask a running instance to exit. Returns 0 when it accepted, 1 when nothing was listening."""
+    from websockets.sync.client import connect
+    try:
+        with connect(f"ws://127.0.0.1:{port}", open_timeout=3) as ws:
+            ws.send(json.dumps({"type": "quit"}))
+    except (OSError, websockets.exceptions.WebSocketException) as e:
+        log.info("no instance on port %d: %s", port, e)
+        return 1
+    log.info("quit sent to port %d", port)
+    return 0
+
+
+def setup_logging(log_dir: Path) -> None:
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    if sys.stderr is not None:  # a windowed exe has no console
+        h = logging.StreamHandler(sys.stderr)
+        h.setFormatter(fmt)
+        root.addHandler(h)
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(log_dir / "service.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError as e:
+        log.warning("file logging disabled: %s", e)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--version", action="version", version=f"LiveCaptionTranslate {__version__}")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--home", type=Path, default=Path(os.environ.get("LCT_HOME", str(ROOT))), help="folder holding bin, models and native (default: LCT_HOME or the program folder)")
+    ap.add_argument("--device", choices=("auto", "gpu", "cpu"), default="auto", help="auto tries the GPU and falls back to the CPU")
+    ap.add_argument("--log-dir", type=Path, default=default_log_dir(), help="rotating service.log location")
+    ap.add_argument("--no-tray", action="store_true", help="run without the notification area icon")
+    ap.add_argument("--quit", action="store_true", help="tell the running instance on --port to exit, then exit")
     ap.add_argument("--eou-ms", type=int, default=800)
     ap.add_argument("--right-context", type=int, default=1, help="rnnt right context frames: 1 low latency, -1 model max")
     ap.add_argument("--unload-grace", type=float, default=20.0, help="seconds Firefox must be absent before the models are unloaded")
     ap.add_argument("--watch-interval", type=float, default=5.0, help="seconds between checks for firefox.exe")
     ap.add_argument("--keep-loaded", action="store_true", help="never unload the models once loaded")
     a = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr)
+    if a.quit:  # stays out of the log file the running instance is writing
+        logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr or open(os.devnull, "w"))
+        sys.exit(send_quit(a.port))
+    setup_logging(a.log_dir)
+    set_home(a.home)
+    log.info("LiveCaptionTranslate %s, home %s, runtime %s, device %s", __version__, HOME, nemo_ffi.resolve_bin(HOME), a.device)
     try:
         asyncio.run(main_async(a))
     except KeyboardInterrupt:
