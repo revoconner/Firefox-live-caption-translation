@@ -128,6 +128,9 @@ Model lifetime (decided 16 Sep 2026): the models are loaded while `firefox.exe` 
 
 Model files live in `backend\models`: `nemotron-3.5-asr-streaming-0.6b.q8_0.gguf` (ASR) and `riva-translate-4b-instruct-v2-q8_0.gguf` (NMT, community q8_0 conversion, verified runtime_compatible by `nemo-speech model info`). The `.nemo` archive there is not used by the runtime.
 
+## Packaging (decided 16 Sep 2026, not built yet)
+The installer covers the backend only: Python runtime, backend code, capture helper, nemo-speech runtime DLLs and licenses, the two models, and an autostart entry. The extension is not part of it; Rev will publish it on addons.mozilla.org separately. The assessment with the required code changes (path resolution from an application root, `--device auto` with CPU fallback, quiet exit on a taken port, file logging, a way to quit, an Inno Setup script) is in SCRATCHPAD.md under the packaging heading. Inno Setup 6 is installed on this machine; bundle the embeddable Python rather than PyInstaller.
+
 ## Python backend dependencies
 Listed in `requirements.txt` at the project root. Kept minimal on purpose: websockets, httpx, numpy, psutil, pytest for tests. No torch, no NeMo toolkit. Anything ML related is served by nemo-speech or a llama.cpp server as a separate process.
 
