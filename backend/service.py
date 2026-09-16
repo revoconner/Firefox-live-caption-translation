@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -696,6 +697,18 @@ def send_quit(port: int) -> int:
     return 0
 
 
+_mutex = None
+
+
+def hold_mutex() -> None:
+    """A named mutex held for the process lifetime. The installer polls it to know when a running instance has exited."""
+    global _mutex
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    _mutex = kernel32.CreateMutexW(None, False, "LiveCaptionTranslate")
+
+
 def setup_logging(log_dir: Path) -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -732,6 +745,7 @@ def main() -> None:
         logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr or open(os.devnull, "w"))
         sys.exit(send_quit(a.port))
     setup_logging(a.log_dir)
+    hold_mutex()
     set_home(a.home)
     log.info("LiveCaptionTranslate %s, home %s, runtime %s, device %s", __version__, HOME, nemo_ffi.resolve_bin(HOME), a.device)
     try:

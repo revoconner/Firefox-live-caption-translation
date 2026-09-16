@@ -128,7 +128,7 @@ Model lifetime (decided 16 Sep 2026): the models are loaded while `firefox.exe` 
 
 Model files live in `backend\models`: `nemotron-3.5-asr-streaming-0.6b.q8_0.gguf` (ASR) and `riva-translate-4b-instruct-v2-q8_0.gguf` (NMT, community q8_0 conversion, verified runtime_compatible by `nemo-speech model info`). The `.nemo` archive there is not used by the runtime.
 
-## Packaging (decided 16 Sep 2026, installer not written yet)
+## Packaging (decided 16 Sep 2026)
 The installer covers the backend only: the PyInstaller build, the nemo-speech runtime DLLs and licenses, proc_loopback.exe, the two models, and an autostart entry. The extension is not part of it; Rev will publish it on addons.mozilla.org separately.
 
 - Rev installed PyInstaller 6.22 into capvenv and chose it over the embeddable Python. The spec is `packaging\LiveCaptionTranslate.spec` (onedir, windowed, icon `backend\icon.ico`). `packaging\build.ps1` builds proc_loopback.exe if missing, runs PyInstaller into `packaging\dist\LiveCaptionTranslate` and then Inno Setup on `packaging\installer.iss` once that file exists. `packaging\build`, `dist` and `out` are git ignored.
@@ -136,7 +136,7 @@ The installer covers the backend only: the PyInstaller build, the nemo-speech ru
 - Application home: `_internal` in the build, the `backend` folder in the dev checkout. It holds `bin`, `models` and `native`. `LCT_HOME` or `--home` overrides it; a home without `bin` (the dev checkout) falls back to the developer install in `C:\PortableProgs`.
 - `backend\tray.py` is the notification area icon, written against the Win32 API with ctypes so there is no pystray or Pillow dependency. Quit goes through the same path as `--quit`, which sends `{"type": "quit"}` over the WebSocket.
 - `--device auto` retries model creation on the CPU when the GPU attempt fails. Rev considers this unnecessary for the target machine; it stays because it is a few lines. Untested on a machine without an NVIDIA card.
-- Inno Setup 6 is installed on this machine (`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`). The GGUFs go in with `Flags: nocompression`. Build notes and verification are in SCRATCHPAD.md.
+- Installer: `packaging\installer.iss` (Inno Setup 6, installed at `C:\Program Files (x86)\Inno Setup 6`). Per user, no elevation: files go to `%LocalAppData%\LiveCaptionTranslate\backend`, the GGUFs with `Flags: nocompression`, a Start menu shortcut, and a Task Scheduler logon task for the installing user created by `packaging\logon_task.ps1` (a per user logon trigger needs no admin; the execution time limit is set to none or the scheduler would kill the backend after three days). The license page shows the root `LICENSE` (MPL 2.0 with the note that the models have their own licenses). Uninstall removes the task, the shortcut and the whole `%LocalAppData%\LiveCaptionTranslate` folder including logs. Before an upgrade or uninstall the script sends `--quit` and waits on the `LiveCaptionTranslate` named mutex the backend holds, with taskkill as the fallback. Bump `AppVersion` in the iss together with `__version__` in service.py.
 
 ## Python backend dependencies
 Listed in `requirements.txt` at the project root. Kept minimal on purpose: websockets, httpx, numpy, psutil, pytest for tests. No torch, no NeMo toolkit. Anything ML related is served by nemo-speech or a llama.cpp server as a separate process.
