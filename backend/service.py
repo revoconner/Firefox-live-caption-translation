@@ -125,6 +125,7 @@ class Engine:
         self.proc: subprocess.Popen | None = None
         self.thread: threading.Thread | None = None
         self.stop_flag = threading.Event()
+        self.lock = threading.Lock()  # start and stop are called from worker threads and must not interleave
         self.final_id = 0
         self.last_lang = ""
 
@@ -145,7 +146,16 @@ class Engine:
         self.loop.call_soon_threadsafe(self.events.put_nowait, msg)
 
     def start(self) -> None:
+        with self.lock:
+            self._start()
+
+    def stop(self) -> None:
+        with self.lock:
+            self._stop()
+
+    def _start(self) -> None:
         if self.proc is not None:
+            self.emit({"type": "status", "state": "capturing", "detail": "already capturing"})
             return
         pid = firefox_root_pid()
         if pid is None:
@@ -160,7 +170,7 @@ class Engine:
         self.emit({"type": "status", "state": "capturing", "detail": f"firefox pid {pid}"})
         log.info("capture started on pid %d", pid)
 
-    def stop(self) -> None:
+    def _stop(self) -> None:
         if self.proc is None:
             return
         self.stop_flag.set()
@@ -187,12 +197,22 @@ class Engine:
         assert proc is not None and proc.stdout is not None
         stream = self.rec.stream(language="auto", interim=True)
         last_partial = ""
+
+        def read_exact(n: int) -> bytes:
+            parts = bytearray()
+            while len(parts) < n:
+                piece = proc.stdout.read(n - len(parts))
+                if not piece:
+                    break
+                parts += piece
+            return bytes(parts)
+
         try:
             while not self.stop_flag.is_set():
-                buf = proc.stdout.read(CHUNK_BYTES)
-                if not buf:
+                buf = read_exact(CHUNK_BYTES)
+                if len(buf) < 2:
                     break
-                samples = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+                samples = np.frombuffer(buf[: len(buf) & ~1], dtype=np.int16).astype(np.float32) / 32768.0
                 stream.push(np.ascontiguousarray(samples), RATE)
                 for r in stream.drain():
                     text = r.text.strip()
@@ -203,8 +223,8 @@ class Engine:
                     elif text and text != last_partial:
                         last_partial = text
                         self.emit({"type": "partial", "text": text})
-        except nemo_ffi.NemoError as e:
-            log.error("asr error: %s", e)
+        except Exception as e:  # noqa: BLE001, a dead ASR thread must be reported, not silent
+            log.exception("asr loop failed")
             self.emit({"type": "status", "state": "error", "detail": str(e)})
         finally:
             stream.close()
@@ -275,7 +295,7 @@ class Server:
                     if not self.active_clients:
                         await asyncio.to_thread(self.engine.stop)
                 elif kind == "ping":
-                    await ws.send(json.dumps({"type": "pong"}))
+                    await ws.send(json.dumps({"type": "pong", "state": "capturing" if self.engine.proc else "idle"}))
         except websockets.ConnectionClosed:
             pass
         finally:

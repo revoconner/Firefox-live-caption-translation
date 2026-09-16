@@ -12,6 +12,7 @@
     let finals = [];
     let partial = "";
     let tick = null;
+    let keepalive = null;
     let currentVideo = null;
 
     function ensureOverlay() {
@@ -85,6 +86,7 @@
         render();
         position();
         if (!tick) tick = setInterval(position, 250);
+        if (!keepalive) keepalive = setInterval(() => browser.runtime.sendMessage({ type: "keepalive" }).catch(() => {}), 10000);
         window.addEventListener("resize", position);
         document.addEventListener("scroll", position, true);
     }
@@ -92,6 +94,7 @@
     function stop() {
         active = false;
         if (tick) { clearInterval(tick); tick = null; }
+        if (keepalive) { clearInterval(keepalive); keepalive = null; }
         window.removeEventListener("resize", position);
         document.removeEventListener("scroll", position, true);
         removeOverlay();
