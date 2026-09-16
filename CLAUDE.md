@@ -52,7 +52,9 @@ Pipeline:
 4. Backend pushes caption events (partial, final, translation) to the extension over a WebSocket on 127.0.0.1:8765.
 5. Extension overlays captions on the largest playing unmuted video of the streaming tab.
 
-Run the backend with `capvenv\Scripts\python.exe backend\service.py`. Flags: `--port`, `--eou-ms`, `--right-context`.
+Run the backend with `capvenv\Scripts\python.exe backend\service.py`. Flags: `--port`, `--eou-ms`, `--right-context`, `--unload-grace`, `--watch-interval`, `--keep-loaded`.
+
+Model lifetime (decided 16 Sep 2026): the models are loaded while `firefox.exe` is running and unloaded after it has been gone for the grace period (20 s default), decided by a watcher thread polling the process list. Rev chose this over load on activate and unload on idle because the loaded but idle cost is only VRAM and reloading on every activation would add latency. An activate that arrives before the watcher has loaded loads the models itself. Unload waits for any in flight translation. Verified: 5.1 GB of VRAM taken while Firefox runs, released to about 0.4 GB (the CUDA context, freed only at process exit) after it closes, and reloaded within the poll interval when it returns.
 
 ## Models
 
@@ -109,7 +111,7 @@ Run the backend with `capvenv\Scripts\python.exe backend\service.py`. Flags: `--
 - The realtime WebSocket accepts `language: "auto"` but its finals carry only `transcript` and `audio_processed`, no language. The C ABI does expose the language, which is why the project uses it. See SCRATCHPAD.md.
 - The model only appends its `<xx-XX>` language tag after terminal punctuation, so finals cut off mid sentence have no language. The backend compensates; see SCRATCHPAD.md.
 - The NMT engine rejects some locale forms (`pt-PT` fails, `es-ES` works), so codes are normalized to bare ones before translating.
-- Throughput on the 4090 is roughly 50x realtime with `rnnt_right_context=1`. Models load in about 2 s, translation of one sentence takes 100 to 200 ms, and the GPU barely registers the load.
+- Measured on the 4090 with `backend\tools\bench_resources.py`: ASR runs 28x realtime in process, the ASR model loads in 0.4 s and the translator in 2.0 s, and one sentence translates in about 290 ms. Compute is negligible either way; the real cost is the 5 GB of VRAM held while the models are loaded. Full numbers in SCRATCHPAD.md.
 
 ## Working notes
 `SCRATCHPAD.md` at the project root holds bugs encountered, workarounds, measurements and other running notes. Write those there, not here. This file stays limited to goals, decisions and stable facts.

@@ -1,6 +1,8 @@
 """Live caption backend: captures Firefox playback audio, runs streaming ASR with language detection, translates non English finals, and streams caption events to the extension over a local WebSocket.
 
-Run: capvenv\\Scripts\\python.exe backend\\service.py [--port 8765] [--eou-ms 800] [--right-context 1]
+Run: capvenv\\Scripts\\python.exe backend\\service.py [--port 8765] [--eou-ms 800] [--right-context 1] [--unload-grace 20] [--keep-loaded]
+
+The models are loaded while firefox.exe is running and unloaded after it has been gone for the grace period, so a backend started at login costs nothing until Firefox appears.
 
 Protocol (JSON text frames, one object per frame):
   client -> server: {"type": "activate"} | {"type": "deactivate"} | {"type": "ping"}
@@ -114,20 +116,85 @@ def firefox_root_pid() -> int | None:
 class Engine:
     """Owns the ASR recognizer, the NMT translator, the capture subprocess and the ASR thread."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, events: asyncio.Queue, right_context: int, eou_ms: int) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, events: asyncio.Queue, right_context: int, eou_ms: int, unload_grace: float = 20.0, watch_interval: float = 5.0, keep_loaded: bool = False) -> None:
         self.loop = loop
         self.events = events
-        t = time.perf_counter()
-        self.rec = nemo_ffi.Recognizer(ASR_MODEL, rnnt_right_context=right_context, endpointing=True, eou_ms=eou_ms)
-        self.nmt = nemo_ffi.Translator(NMT_MODEL)
-        log.info("models loaded in %.1fs", time.perf_counter() - t)
+        self.right_context = right_context
+        self.eou_ms = eou_ms
+        self.unload_grace = unload_grace
+        self.watch_interval = watch_interval
+        self.keep_loaded = keep_loaded
+        self.rec: nemo_ffi.Recognizer | None = None
+        self.nmt: nemo_ffi.Translator | None = None
         self.nmt_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nmt")
+        self.inflight = 0  # translations queued or running, so unload never pulls the model from under one
         self.proc: subprocess.Popen | None = None
         self.thread: threading.Thread | None = None
         self.stop_flag = threading.Event()
-        self.lock = threading.Lock()  # start and stop are called from worker threads and must not interleave
+        self.lock = threading.Lock()  # start, stop, load and unload run on worker threads and must not interleave
         self.final_id = 0
         self.last_lang = ""
+        self.closing = threading.Event()
+        threading.Thread(target=self._watch_firefox, name="firefox-watch", daemon=True).start()
+
+    @property
+    def loaded(self) -> bool:
+        return self.rec is not None
+
+    def load(self) -> None:
+        with self.lock:
+            self._load()
+
+    def unload(self) -> bool:
+        with self.lock:
+            return self._unload()
+
+    def _load(self) -> None:
+        if self.rec is not None:
+            return
+        t = time.perf_counter()
+        self.emit({"type": "status", "state": "loading", "detail": "loading models"})
+        rec = nemo_ffi.Recognizer(ASR_MODEL, rnnt_right_context=self.right_context, endpointing=True, eou_ms=self.eou_ms)
+        self.nmt = nemo_ffi.Translator(NMT_MODEL)
+        self.rec = rec  # assigned last so `loaded` only turns true once both models are in
+        log.info("models loaded in %.1fs", time.perf_counter() - t)
+        self.emit({"type": "status", "state": "idle", "detail": "models loaded"})
+
+    def _unload(self) -> bool:
+        if self.rec is None:
+            return True
+        if self.proc is not None or self.inflight:
+            return False
+        if self.nmt:
+            self.nmt.close()
+            self.nmt = None
+        self.rec.close()
+        self.rec = None
+        log.info("models unloaded")
+        self.emit({"type": "status", "state": "unloaded", "detail": "firefox not running"})
+        return True
+
+    def _watch_firefox(self) -> None:
+        """Keep the models loaded exactly while Firefox is running. Unloading waits out a grace period so a Firefox restart does not pay the load twice."""
+        absent_since: float | None = None
+        while not self.closing.wait(self.watch_interval):
+            running = firefox_root_pid() is not None
+            if running:
+                absent_since = None
+                if not self.loaded:
+                    try:
+                        self.load()
+                    except nemo_ffi.NemoError as e:
+                        log.error("model load failed: %s", e)
+                        self.emit({"type": "status", "state": "error", "detail": f"model load failed: {e}"})
+            elif self.loaded and not self.keep_loaded:
+                if absent_since is None:
+                    absent_since = time.monotonic()
+                elif time.monotonic() - absent_since >= self.unload_grace:
+                    if self.proc is not None:
+                        self.stop()  # capture cannot outlive the process it was capturing
+                    if self.unload():
+                        absent_since = None
 
     def resolve_lang(self, tagged: str, text: str) -> str:
         """The model only emits its language tag after terminal punctuation, so untagged finals fall back to the last tagged language when the script agrees, else to the script's default language."""
@@ -161,6 +228,7 @@ class Engine:
         if pid is None:
             self.emit({"type": "status", "state": "error", "detail": "firefox.exe not found"})
             return
+        self._load()  # no-op once the watcher has done it; covers an activate that beats the watcher
         self.proc = subprocess.Popen([str(CAPTURE_EXE), "--pid", str(pid), "--rate", str(RATE)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         self.stop_flag.clear()
         self.last_lang = ""
@@ -195,7 +263,9 @@ class Engine:
     def _asr_loop(self) -> None:
         proc = self.proc
         assert proc is not None and proc.stdout is not None
-        stream = self.rec.stream(language="auto", interim=True)
+        rec = self.rec
+        assert rec is not None
+        stream = rec.stream(language="auto", interim=True)
         last_partial = ""
 
         def read_exact(n: int) -> bytes:
@@ -238,23 +308,29 @@ class Engine:
         needs = bool(lang) and not lang.lower().startswith("en")
         self.emit({"type": "final", "id": fid, "text": text, "lang": lang, "needs_translation": needs})
         if needs:
+            self.inflight += 1
             self.nmt_pool.submit(self._translate, fid, text, lang)
 
     def _translate(self, fid: int, text: str, lang: str) -> None:
         t = time.perf_counter()
         try:
-            out = self.nmt.translate([text], nmt_code(lang), "en")[0]
+            nmt = self.nmt
+            if nmt is None:
+                return
+            out = nmt.translate([text], nmt_code(lang), "en")[0]
         except nemo_ffi.NemoError as e:
             log.error("nmt error (%s): %s", lang, e)
             return
+        finally:
+            self.inflight -= 1
         log.info("nmt %s %.2fs: %s", lang, time.perf_counter() - t, out)
         self.emit({"type": "translation", "id": fid, "text": out, "lang": lang})
 
     def close(self) -> None:
+        self.closing.set()
         self.stop()
-        self.nmt_pool.shutdown(wait=False)
-        self.nmt.close()
-        self.rec.close()
+        self.nmt_pool.shutdown(wait=True)
+        self.unload()
 
 
 class Server:
@@ -308,7 +384,7 @@ class Server:
 async def main_async(a: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
     events: asyncio.Queue = asyncio.Queue()
-    engine = await asyncio.to_thread(Engine, loop, events, a.right_context, a.eou_ms)
+    engine = Engine(loop, events, a.right_context, a.eou_ms, unload_grace=a.unload_grace, watch_interval=a.watch_interval, keep_loaded=a.keep_loaded)
     server = Server(engine, events)
     async with serve(server.handler, "127.0.0.1", a.port, max_size=1 << 20):
         log.info("listening on ws://127.0.0.1:%d", a.port)
@@ -323,6 +399,9 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--eou-ms", type=int, default=800)
     ap.add_argument("--right-context", type=int, default=1, help="rnnt right context frames: 1 low latency, -1 model max")
+    ap.add_argument("--unload-grace", type=float, default=20.0, help="seconds Firefox must be absent before the models are unloaded")
+    ap.add_argument("--watch-interval", type=float, default=5.0, help="seconds between checks for firefox.exe")
+    ap.add_argument("--keep-loaded", action="store_true", help="never unload the models once loaded")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr)
     try:
