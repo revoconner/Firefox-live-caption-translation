@@ -8,7 +8,7 @@ An extension for firefox and a backend server (windows only) for compute to gene
 - Caption UI can be customised and auto fits in the video layout as firefox is resized. 
 - Auto detects language in real time.
 - AI models only activates if extension is turned on for any tab and has active data streaming leading to good use of compute resources when not in use.
-- Server resides in windows tray (WIP)
+- Server resides in windows tray
 
 ## Installation
 1. Download the backend installation files (.exe and .bin files, so 4 files in total) from the release section. [Firefox Add Ons: Live Caption Video](https://addons.mozilla.org/en-GB/firefox/addon/live-caption-video/) 
