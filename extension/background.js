@@ -1,35 +1,55 @@
-// Owns the single WebSocket to the local backend and the one active tab. Toolbar click toggles the active tab.
-// Switching the active tab keeps the socket and the capture running; only toggling off closes it.
+// Owns the single WebSocket to the local backend and the set of tabs the user turned on.
+//
+// A tab stays on until the user clicks the button again, across reloads and navigation. Capture only runs
+// for the one enabled tab that is in the foreground and has a playing video, so several tabs can be on at
+// once without fighting over the audio stream. Switching tabs moves the caption stream with no clicks.
 const BACKEND_URL = "ws://127.0.0.1:8765";
 const RECONNECT_MS = 2000;
 const PING_MS = 15000;
+const STOP_DELAY_MS = 1500; // ride out pauses and seeks instead of stopping capture immediately
 
-let activeTabId = null;
+const enabled = new Set(); // tab ids the user turned on
+const playing = new Map(); // tabId -> Set of frame ids reporting a playing video
+let streamTabId = null; // the enabled tab currently receiving captions
+let capturing = false; // whether the backend was last told to capture
 let ws = null;
 let reconnectTimer = null;
 let pingTimer = null;
+let stopTimer = null;
 
-// The event page can be terminated and restarted by Firefox; the active tab survives in session storage.
-function persistActive() {
-    browser.storage.session.set({ activeTabId }).catch(() => {});
+// Firefox can suspend and restart this event page at any time, so the enabled set lives in session storage.
+let ready = null;
+
+function init() {
+    if (!ready) {
+        ready = browser.storage.session.get("enabledTabs").then(async (r) => {
+            const ids = Array.isArray(r.enabledTabs) ? r.enabledTabs : [];
+            for (const id of ids) {
+                try {
+                    await browser.tabs.get(id); // drop tabs closed while we were suspended
+                    enabled.add(id);
+                    paint(id);
+                } catch { /* gone */ }
+            }
+        }).catch(() => {});
+    }
+    return ready;
 }
 
-browser.storage.session.get("activeTabId").then((r) => {
-    if (activeTabId === null && typeof r.activeTabId === "number") {
-        activeTabId = r.activeTabId;
-        setBadge(activeTabId, true);
-        connect();
-    }
-}).catch(() => {});
+function persist() {
+    browser.storage.session.set({ enabledTabs: [...enabled] }).catch(() => {});
+}
 
-function setBadge(tabId, on) {
-    if (tabId === null) return;
+// Per-tab badge and title are cleared by Firefox whenever the tab navigates, so this is re-applied on update.
+function paint(tabId) {
+    const on = enabled.has(tabId);
     browser.action.setBadgeText({ tabId, text: on ? "ON" : "" }).catch(() => {});
     if (on) browser.action.setBadgeBackgroundColor({ tabId, color: "#2e7d32" }).catch(() => {});
+    browser.action.setTitle({ tabId, title: on ? "Live captions on for this tab: click to turn off" : "Live captions: click to turn on for this tab" }).catch(() => {});
 }
 
 function sendToTab(tabId, msg) {
-    if (tabId === null) return;
+    if (tabId === null || tabId === undefined) return;
     browser.tabs.sendMessage(tabId, msg).catch(() => {});
 }
 
@@ -41,24 +61,31 @@ function connect() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = new WebSocket(BACKEND_URL);
     ws.onopen = () => {
-        sendToTab(activeTabId, { type: "backend", connected: true });
-        if (activeTabId !== null) wsSend({ type: "activate" });
+        sendToTab(streamTabId, { type: "backend", connected: true });
+        capturing = false;
+        apply();
         if (!pingTimer) pingTimer = setInterval(() => wsSend({ type: "ping" }), PING_MS);
     };
     ws.onmessage = (ev) => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         if (msg.type === "pong") {
-            if (msg.state === "idle" && activeTabId !== null) wsSend({ type: "activate" });
+            // Self-heal if our idea of the backend state drifted from the backend's.
+            const backendCapturing = msg.state === "capturing";
+            if (backendCapturing !== capturing) {
+                capturing = backendCapturing;
+                apply();
+            }
             return;
         }
-        sendToTab(activeTabId, msg);
+        sendToTab(streamTabId, msg);
     };
     ws.onclose = () => {
         ws = null;
+        capturing = false;
         if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-        sendToTab(activeTabId, { type: "backend", connected: false });
-        if (activeTabId !== null) scheduleReconnect();
+        sendToTab(streamTabId, { type: "backend", connected: false });
+        if (enabled.size) scheduleReconnect();
     };
     ws.onerror = () => {};
 }
@@ -67,63 +94,148 @@ function scheduleReconnect() {
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        if (activeTabId !== null) connect();
+        if (enabled.size) connect();
     }, RECONNECT_MS);
 }
 
 function disconnect() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
     wsSend({ type: "deactivate" });
+    capturing = false;
     if (ws) { ws.close(); ws = null; }
 }
 
-function deactivate() {
-    const prev = activeTabId;
-    activeTabId = null;
-    persistActive();
-    disconnect();
-    setBadge(prev, false);
-    sendToTab(prev, { type: "active", active: false });
+function isPlaying(tabId) {
+    const frames = playing.get(tabId);
+    return !!(frames && frames.size);
 }
 
-function activate(tabId) {
-    const prev = activeTabId;
-    if (prev !== null && prev !== tabId) {
-        setBadge(prev, false);
-        sendToTab(prev, { type: "active", active: false });
+// Bring the backend in line with what the current stream tab needs.
+function apply() {
+    const want = streamTabId !== null && isPlaying(streamTabId);
+    if (want) {
+        if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+        if (!capturing) {
+            capturing = true;
+            connect();
+            wsSend({ type: "activate" });
+        }
+        return;
     }
-    activeTabId = tabId;
-    persistActive();
-    setBadge(tabId, true);
-    sendToTab(tabId, { type: "active", active: true });
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        sendToTab(tabId, { type: "backend", connected: true });
-        wsSend({ type: "activate" });
+    if (capturing && !stopTimer) {
+        stopTimer = setTimeout(() => {
+            stopTimer = null;
+            if (streamTabId !== null && isPlaying(streamTabId)) return;
+            capturing = false;
+            wsSend({ type: "deactivate" });
+        }, STOP_DELAY_MS);
+    }
+}
+
+// The stream tab is the enabled tab that is active in the most recently focused window.
+async function pickStreamTab() {
+    if (!enabled.size) return null;
+    try {
+        const tabs = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        const t = tabs[0];
+        return t && enabled.has(t.id) ? t.id : null;
+    } catch {
+        return null;
+    }
+}
+
+async function refresh() {
+    const next = await pickStreamTab();
+    if (next !== streamTabId) {
+        const prev = streamTabId;
+        streamTabId = next;
+        if (prev !== null) sendToTab(prev, { type: "stream", streaming: false });
+        if (next !== null) sendToTab(next, { type: "stream", streaming: true, connected: !!(ws && ws.readyState === WebSocket.OPEN) });
+    }
+    if (enabled.size && !ws) connect();
+    if (!enabled.size) disconnect();
+    apply();
+}
+
+browser.action.onClicked.addListener(async (tab) => {
+    await init();
+    if (enabled.has(tab.id)) {
+        enabled.delete(tab.id);
+        playing.delete(tab.id);
+        sendToTab(tab.id, { type: "active", active: false });
     } else {
-        connect();
+        enabled.add(tab.id);
+        sendToTab(tab.id, { type: "active", active: true });
     }
-}
-
-browser.action.onClicked.addListener((tab) => {
-    if (tab.id === activeTabId) deactivate();
-    else activate(tab.id);
+    persist();
+    paint(tab.id);
+    await refresh();
 });
 
-browser.tabs.onRemoved.addListener((tabId) => {
-    if (tabId === activeTabId) deactivate();
+browser.tabs.onActivated.addListener(async () => {
+    await init();
+    await refresh();
+});
+
+browser.windows.onFocusChanged.addListener(async (windowId) => {
+    // Ignore the browser losing focus entirely: the video keeps playing and the user may still be listening.
+    if (windowId === browser.windows.WINDOW_ID_NONE) return;
+    await init();
+    await refresh();
+});
+
+// Navigation clears per-tab badge state and tears down content scripts, but the tab stays enabled.
+browser.tabs.onUpdated.addListener(async (tabId, change) => {
+    await init();
+    if (!enabled.has(tabId)) return;
+    if (change.status === "loading") {
+        playing.delete(tabId);
+        apply();
+    }
+    paint(tabId);
+}, { properties: ["status"] });
+
+browser.tabs.onRemoved.addListener(async (tabId) => {
+    await init();
+    if (!enabled.delete(tabId)) return;
+    playing.delete(tabId);
+    persist();
+    await refresh();
 });
 
 browser.runtime.onMessage.addListener((msg, sender) => {
     if (!msg) return undefined;
+    const tabId = sender.tab && sender.tab.id;
+    const frameId = sender.frameId || 0;
+
     if (msg.type === "query") {
-        const active = !!(sender.tab && sender.tab.id === activeTabId);
-        return Promise.resolve({ active, connected: !!(ws && ws.readyState === WebSocket.OPEN) });
+        return init().then(() => ({
+            active: enabled.has(tabId),
+            streaming: tabId === streamTabId,
+            connected: !!(ws && ws.readyState === WebSocket.OPEN),
+        }));
+    }
+    if (msg.type === "playing") {
+        return init().then(() => {
+            if (!enabled.has(tabId)) return { ok: false };
+            let frames = playing.get(tabId);
+            if (!frames) { frames = new Set(); playing.set(tabId, frames); }
+            if (msg.playing) frames.add(frameId); else frames.delete(frameId);
+            apply();
+            return { ok: true };
+        });
     }
     if (msg.type === "keepalive") {
-        // Content script pings while active so the event page is not suspended and the socket survives.
-        if (activeTabId !== null && (!ws || ws.readyState === WebSocket.CLOSED)) connect();
-        return Promise.resolve({ ok: true });
+        // Firefox suspends this event page after ~30s without an extension event, which would kill the
+        // socket. The streaming tab pings so the page stays resident while captions are flowing.
+        return init().then(() => {
+            if (enabled.size && (!ws || ws.readyState === WebSocket.CLOSED)) connect();
+            return { ok: true };
+        });
     }
     return undefined;
 });
+
+init();
