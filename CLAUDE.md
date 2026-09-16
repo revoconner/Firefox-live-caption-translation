@@ -47,9 +47,9 @@ Inference runs in process through the NeMo-Speech.cpp **C ABI**, loaded with cty
 
 Pipeline:
 1. Backend captures Firefox playback audio with WASAPI process loopback (ActivateAudioInterfaceAsync with AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, include mode on the root firefox.exe PID, which also captures its child processes). Available since Windows 10 build 20348, so fine on 24H2. Python has no maintained package for per process loopback, so this is a small native helper, `backend\native\proc_loopback.cpp`, built by its `build.ps1` with clang, that emits mono PCM16 at 16 kHz on stdout. PyAudioWPatch only does whole device loopback and is a fallback, not the plan.
-2. Backend pushes float32 mono frames into a streaming recognizer with language `auto` and reads partials and finals with their detected language.
-3. For finals whose language is not English, a worker thread translates to English through the NMT translator.
-4. Backend pushes caption events (partial, final, translation) to the extension over a WebSocket on 127.0.0.1:8765.
+2. Backend pushes float32 mono frames into a streaming recognizer with language `auto` and reads partials and finals with their detected language. A partial that visibly ended a sentence and sat unchanged for 300 ms is cut early with a forced endpoint.
+3. For finals whose language is not English, a worker thread translates to English through the NMT translator. A final that stopped mid sentence (no sentence punctuation, or the model's own trailing ellipsis) is merged with the next one and re-translated as a whole sentence, replacing the fragment on screen. The in progress line is also translated live, throttled, with a stable prefix computed by agreement with the previous attempt.
+4. Backend pushes caption events (partial, live_translation, final with optional replaces, translation) to the extension over a WebSocket on 127.0.0.1:8765. The extension sends `config` with the live translation toggle.
 5. Extension overlays captions on the largest playing unmuted video of the streaming tab.
 
 Run the backend with `capvenv\Scripts\python.exe backend\service.py`. Flags: `--port`, `--eou-ms`, `--right-context`, `--unload-grace`, `--watch-interval`, `--keep-loaded`.

@@ -43,6 +43,11 @@ function makeWorld(initialSession = {}) {
                 get: async (key) => (key in world.sessionStore ? { [key]: world.sessionStore[key] } : {}),
                 set: async (obj) => Object.assign(world.sessionStore, obj),
             },
+            local: {
+                get: async () => ({}),
+                set: async () => {},
+            },
+            onChanged: listener("storage"),
         },
         action: {
             onClicked: listener("clicked"),
@@ -138,7 +143,7 @@ function makeWorld(initialSession = {}) {
     };
     world.socket = () => world.sockets[world.sockets.length - 1];
     world.openSocket = async () => { world.socket().open(); await tick(); };
-    world.backendSent = () => world.sockets.flatMap((s) => s.sent).map((m) => m.type).filter((t) => t !== "ping");
+    world.backendSent = () => world.sockets.flatMap((s) => s.sent).map((m) => m.type).filter((t) => t !== "ping" && t !== "config");
     world.tabSent = (tabId, type) => world.tabMessages.filter((m) => m.tabId === tabId && m.msg.type === type).map((m) => m.msg);
     world.clearLog = () => { world.tabMessages.length = 0; for (const s of world.sockets) s.sent.length = 0; };
     return world;

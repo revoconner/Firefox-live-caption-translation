@@ -10,6 +10,7 @@
         <section>
             <h2>Behaviour</h2>
             <label class="row"><input type="checkbox" name="showLive"> Show live transcription in progress <span class="hint">The italic line that updates as speech is recognised. Off shows finished lines only.</span></label>
+            <label class="row"><input type="checkbox" name="liveTranslation"> Translate the live line as it goes <span class="hint">For non English speech the italic line shows English while the sentence is still being spoken. Words that have settled are bright, the still changing tail is dimmed. Japanese and Korean rewrite themselves more, since their verbs come last.</span></label>
             <label class="row"><input type="checkbox" name="showUntranslated"> Show untranslated text <span class="hint">Show a finished non English line immediately and replace it when the English arrives. Off waits for the translation.</span></label>
             <label class="row">Delay before removing a caption <input type="number" name="removeDelayMs" min="0" max="60000" step="50"> ms <span class="hint">Counted from when the line is complete: after its translation, or after the final transcription when none is needed.</span></label>
         </section>

@@ -21,8 +21,9 @@
     let partialEl = null;
     let linesEl = null;
     let statusEl = null;
-    let finals = []; // {id, text, translation, needs_translation, timer}
+    let finals = []; // {id, text, translation, needs_translation, timer, replacedBy}
     let partial = "";
+    let live = null; // {text, stable, lang} English for the in progress line, when the speech is not English
     let tick = null;
     let keepalive = null;
     let quietTimer = null;
@@ -82,8 +83,33 @@
         return !f.needs_translation || !!f.translation;
     }
 
+    // A caption replaced by a merged one stays visible until the merged caption is ready, so the screen never blanks.
     function visible(f) {
+        if (f.replacedBy) {
+            const r = finals.find((x) => x.id === f.replacedBy);
+            return !r || !visible(r);
+        }
         return isComplete(f) || settings.showUntranslated;
+    }
+
+    function renderPartial() {
+        const useLive = settings.liveTranslation && live && partial;
+        const useSource = settings.showLive && partial;
+        if (useLive) {
+            const stable = document.createElement("span");
+            stable.textContent = live.stable;
+            const rest = document.createElement("span");
+            rest.className = "lct-unstable";
+            rest.textContent = live.text.slice(live.stable.length);
+            partialEl.replaceChildren(stable, rest);
+            partialEl.style.display = "";
+        } else if (useSource) {
+            partialEl.textContent = partial;
+            partialEl.style.display = "";
+        } else {
+            partialEl.textContent = "";
+            partialEl.style.display = "none";
+        }
     }
 
     function render() {
@@ -95,9 +121,7 @@
             if (f.translation) d.title = f.text;
             return d;
         }));
-        const showPartial = settings.showLive && partial;
-        partialEl.textContent = showPartial ? partial : "";
-        partialEl.style.display = showPartial ? "" : "none";
+        renderPartial();
     }
 
     function dropFinal(f) {
@@ -140,6 +164,15 @@
         quietTimer = null;
         for (const f of finals) clearTimeout(f.timer);
         finals = [];
+        live = null;
+    }
+
+    // Once a merged caption is complete, the fragments it replaced go immediately.
+    function dropReplacedBy(f) {
+        for (const g of finals.filter((x) => x.replacedBy === f.id)) {
+            clearTimeout(g.timer);
+            finals.splice(finals.indexOf(g), 1);
+        }
     }
 
     function report(isPlaying) {
@@ -232,16 +265,28 @@
                 touch();
                 render();
                 break;
+            case "live_translation":
+                if (!streaming) return;
+                live = { text: msg.text, stable: msg.stable, lang: msg.lang };
+                touch();
+                render();
+                break;
             case "final": {
                 if (!streaming) return;
                 partial = "";
-                const f = { id: msg.id, text: msg.text, lang: msg.lang, needs_translation: msg.needs_translation, translation: null, timer: null };
-                finals.push(f);
-                while (finals.length > MAX_LINES) {
-                    clearTimeout(finals[0].timer);
-                    finals.shift();
+                live = null;
+                const f = { id: msg.id, text: msg.text, lang: msg.lang, needs_translation: msg.needs_translation, translation: null, timer: null, replacedBy: null };
+                for (const id of msg.replaces || []) {
+                    const g = finals.find((x) => x.id === id);
+                    if (g) { g.replacedBy = f.id; clearTimeout(g.timer); g.timer = null; }
                 }
-                if (isComplete(f)) onComplete(f); else touch();
+                finals.push(f);
+                while (finals.filter((x) => !x.replacedBy).length > MAX_LINES) {
+                    const oldest = finals.find((x) => !x.replacedBy);
+                    clearTimeout(oldest.timer);
+                    finals.splice(finals.indexOf(oldest), 1);
+                }
+                if (isComplete(f)) { dropReplacedBy(f); onComplete(f); } else touch();
                 render();
                 break;
             }
@@ -250,6 +295,7 @@
                 const f = finals.find((x) => x.id === msg.id);
                 if (f) {
                     f.translation = msg.text;
+                    dropReplacedBy(f);
                     onComplete(f);
                     render();
                 }

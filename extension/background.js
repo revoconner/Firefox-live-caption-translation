@@ -57,11 +57,23 @@ function wsSend(obj) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+// The backend only translates the in progress line when asked, so the setting is forwarded on connect and on change.
+function sendConfig() {
+    browser.storage.local.get("liveTranslation").then((r) => {
+        wsSend({ type: "config", live_translation: r.liveTranslation === undefined ? true : !!r.liveTranslation });
+    }).catch(() => {});
+}
+
+browser.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && "liveTranslation" in changes) sendConfig();
+});
+
 function connect() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = new WebSocket(BACKEND_URL);
     ws.onopen = () => {
         sendToTab(streamTabId, { type: "backend", connected: true });
+        sendConfig();
         capturing = false;
         apply();
         if (!pingTimer) pingTimer = setInterval(() => wsSend({ type: "ping" }), PING_MS);

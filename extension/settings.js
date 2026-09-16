@@ -1,6 +1,7 @@
 // Shared between the options page and the content script: default settings and helpers.
 const LCT_DEFAULTS = {
     showLive: true,          // show the italic in progress transcription
+    liveTranslation: true,   // translate the in progress line as it grows, shown in place of the source partial
     showUntranslated: false, // show a finalised non English line before its translation arrives
     removeDelayMs: 500,      // how long a completed caption stays after its audio ended
     bgColor: "#000000",
@@ -21,6 +22,7 @@ function lctHexToRgba(hex, opacityPercent) {
 function lctNormalize(raw) {
     const s = { ...LCT_DEFAULTS, ...(raw || {}) };
     s.showLive = !!s.showLive;
+    s.liveTranslation = !!s.liveTranslation;
     s.showUntranslated = !!s.showUntranslated;
     s.removeDelayMs = Math.max(0, Math.min(60000, Number(s.removeDelayMs) || 0));
     s.fontSize = Math.max(8, Math.min(120, Number(s.fontSize) || LCT_DEFAULTS.fontSize));

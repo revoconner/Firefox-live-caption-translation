@@ -42,6 +42,66 @@ CAPTURE_EXE = ROOT / "native" / "proc_loopback.exe"
 RATE = 16000
 CHUNK_MS = 80
 CHUNK_BYTES = RATE * CHUNK_MS // 1000 * 2
+TERMINAL_PUNCT = ".?!。！？"  # sentence enders, Latin and CJK
+FORCE_EOU_S = 0.3  # a partial ending in sentence punctuation and unchanged this long is cut early
+MERGE_WINDOW_S = 12.0  # a final without terminal punctuation waits this long to be joined with the next
+LIVE_MIN_INTERVAL_S = 0.4  # floor between two live translations of the in progress line
+ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "st", "vs", "etc", "no", "jr", "sr", "prof", "inc", "ltd", "co", "e.g", "i.e", "sra", "sr", "hr", "fr", "bzw", "ca", "usw", "z.b"}
+NO_SPACE_LANGS = ("ja", "zh", "th")
+
+
+ELLIPSIS_CHAR = chr(0x2026)  # the single character ellipsis the model sometimes emits
+
+
+def trailing_ellipsis(text: str) -> bool:
+    return text.endswith("...") or text.endswith(ELLIPSIS_CHAR)
+
+
+def ends_sentence(text: str) -> bool:
+    """A trailing ellipsis is the model's own marker for speech that stopped mid sentence, so it does not count."""
+    text = text.rstrip()
+    return bool(text) and text[-1] in TERMINAL_PUNCT and not trailing_ellipsis(text)
+
+
+def strip_ellipsis(text: str) -> str:
+    text = text.rstrip()
+    while trailing_ellipsis(text):
+        text = text[:-1] if text.endswith(ELLIPSIS_CHAR) else text[:-3]
+        text = text.rstrip()
+    return text
+
+
+def looks_complete(text: str) -> bool:
+    """Whether a partial ending in sentence punctuation is safe to cut: not an abbreviation, not a number, not a two word stub."""
+    if not ends_sentence(text):
+        return False
+    body = text[:-1].rstrip()
+    if not body or body[-1].isdigit():
+        return False
+    if script_family(text) in ("ja", "zh", "ko", "th"):
+        return len(body) >= 4
+    words = body.split()
+    if len(words) < 3:
+        return False
+    last = words[-1].strip("\"'()[]").lower().rstrip(".")
+    return len(last) > 1 and last not in ABBREVIATIONS
+
+
+def join_fragments(a: str, b: str, lang: str) -> str:
+    a = strip_ellipsis(a)
+    if nmt_code(lang) in NO_SPACE_LANGS:
+        return a + b
+    if b[:1].isupper() and not b[:2].isupper():  # the model capitalises every final; only a sentence start should be
+        b = b[0].lower() + b[1:]
+    return a + " " + b
+
+
+def common_word_prefix(a: str, b: str) -> str:
+    aw, bw = a.split(), b.split()
+    n = 0
+    while n < min(len(aw), len(bw)) and aw[n] == bw[n]:
+        n += 1
+    return " ".join(aw[:n])
 
 
 def nmt_code(lang: str) -> str:
@@ -135,7 +195,15 @@ class Engine:
         self.final_id = 0
         self.last_lang = ""
         self.closing = threading.Event()
+        # Live translation of the in progress line: newest partial wins, one worker, rate limited.
+        self.live_translation = True
+        self.live_cv = threading.Condition()
+        self.live_pending: tuple[int, str, str] | None = None  # (utterance sequence, text, lang)
+        self.live_prev = ""  # previous live output for the current utterance, for the stable prefix
+        self.utt_seq = 0
+        self.open_fragment: dict | None = None  # a final without terminal punctuation waiting to be merged
         threading.Thread(target=self._watch_firefox, name="firefox-watch", daemon=True).start()
+        threading.Thread(target=self._live_worker, name="live-nmt", daemon=True).start()
 
     @property
     def loaded(self) -> bool:
@@ -196,11 +264,8 @@ class Engine:
                     if self.unload():
                         absent_since = None
 
-    def resolve_lang(self, tagged: str, text: str) -> str:
-        """The model only emits its language tag after terminal punctuation, so untagged finals fall back to the last tagged language when the script agrees, else to the script's default language."""
-        if tagged:
-            self.last_lang = tagged
-            return tagged
+    def infer_lang(self, text: str) -> str:
+        """Best guess for untagged text: the last tagged language when the script agrees, else the script's default language, else unknown."""
         fam = script_family(text)
         if not fam:
             return ""
@@ -208,6 +273,13 @@ class Engine:
         if last_fam == fam or (fam == "zh" and last_fam == "ja"):
             return self.last_lang
         return FAMILY_DEFAULT.get(fam, "")
+
+    def resolve_lang(self, tagged: str, text: str) -> str:
+        """The model only emits its language tag after terminal punctuation, so untagged finals fall back to infer_lang."""
+        if tagged:
+            self.last_lang = tagged
+            return tagged
+        return self.infer_lang(text)
 
     def emit(self, msg: dict) -> None:
         self.loop.call_soon_threadsafe(self.events.put_nowait, msg)
@@ -232,6 +304,8 @@ class Engine:
         self.proc = subprocess.Popen([str(CAPTURE_EXE), "--pid", str(pid), "--rate", str(RATE)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         self.stop_flag.clear()
         self.last_lang = ""
+        self.open_fragment = None
+        self._end_utterance()
         self.thread = threading.Thread(target=self._asr_loop, name="asr", daemon=True)
         self.thread.start()
         threading.Thread(target=self._drain_stderr, name="capture-stderr", daemon=True).start()
@@ -263,10 +337,6 @@ class Engine:
     def _asr_loop(self) -> None:
         proc = self.proc
         assert proc is not None and proc.stdout is not None
-        rec = self.rec
-        assert rec is not None
-        stream = rec.stream(language="auto", interim=True)
-        last_partial = ""
 
         def read_exact(n: int) -> bytes:
             parts = bytearray()
@@ -278,6 +348,23 @@ class Engine:
             return bytes(parts)
 
         try:
+            self.run_stream(read_exact)
+        except Exception as e:  # noqa: BLE001, a dead ASR thread must be reported, not silent
+            log.exception("asr loop failed")
+            self.emit({"type": "status", "state": "error", "detail": str(e)})
+        finally:
+            if not self.stop_flag.is_set():
+                self.emit({"type": "status", "state": "idle", "detail": "capture ended"})
+
+    def run_stream(self, read_exact) -> None:
+        """Feed PCM16 chunks from read_exact into one recognition stream until it returns short. Separate from the capture process so tests can drive it from a file."""
+        rec = self.rec
+        assert rec is not None
+        stream = rec.stream(language="auto", interim=True)
+        last_partial = ""
+        partial_since = 0.0
+        forced_for = ""
+        try:
             while not self.stop_flag.is_set():
                 buf = read_exact(CHUNK_BYTES)
                 if len(buf) < 2:
@@ -288,26 +375,88 @@ class Engine:
                     text = r.text.strip()
                     if r.final:
                         last_partial = ""
+                        forced_for = ""
+                        self._end_utterance()
                         if text:
                             self._on_final(text, r.languages[0] if r.languages else "")
                     elif text and text != last_partial:
                         last_partial = text
-                        self.emit({"type": "partial", "text": text})
-        except Exception as e:  # noqa: BLE001, a dead ASR thread must be reported, not silent
-            log.exception("asr loop failed")
-            self.emit({"type": "status", "state": "error", "detail": str(e)})
+                        partial_since = time.monotonic()
+                        self._on_partial(text)
+                # Punctuation aware endpointing: a sentence that has visibly ended is cut now instead of after the full silence threshold.
+                if last_partial and last_partial != forced_for and looks_complete(last_partial) and time.monotonic() - partial_since >= FORCE_EOU_S:
+                    forced_for = last_partial
+                    stream.force_endpoint()
         finally:
             stream.close()
-            if not self.stop_flag.is_set():
-                self.emit({"type": "status", "state": "idle", "detail": "capture ended"})
+
+    def _end_utterance(self) -> None:
+        with self.live_cv:
+            self.utt_seq += 1
+            self.live_pending = None
+            self.live_prev = ""
+
+    def _on_partial(self, text: str) -> None:
+        self.emit({"type": "partial", "text": text})
+        if not self.live_translation or self.nmt is None:
+            return
+        lang = self.infer_lang(text)
+        if not lang or lang.lower().startswith("en"):
+            return
+        with self.live_cv:
+            self.live_pending = (self.utt_seq, text, lang)
+            self.live_cv.notify()
+
+    def _live_worker(self) -> None:
+        """Translates the newest in progress line, at most every LIVE_MIN_INTERVAL_S, and reports which leading words agree with the previous attempt."""
+        last_run = 0.0
+        while not self.closing.is_set():
+            with self.live_cv:
+                while self.live_pending is None and not self.closing.is_set():
+                    self.live_cv.wait(1.0)
+                if self.closing.is_set():
+                    return
+                seq, text, lang = self.live_pending
+                self.live_pending = None
+            wait = LIVE_MIN_INTERVAL_S - (time.monotonic() - last_run)
+            if wait > 0:
+                time.sleep(wait)
+                with self.live_cv:  # a newer partial may have arrived while waiting
+                    if self.live_pending is not None and self.live_pending[0] == seq:
+                        seq, text, lang = self.live_pending
+                        self.live_pending = None
+            nmt = self.nmt
+            if nmt is None or seq != self.utt_seq:
+                continue
+            last_run = time.monotonic()
+            try:
+                out = nmt.translate([text], nmt_code(lang), "en")[0]
+            except nemo_ffi.NemoError as e:
+                log.error("live nmt error (%s): %s", lang, e)
+                continue
+            with self.live_cv:
+                if seq != self.utt_seq:
+                    continue
+                stable = common_word_prefix(self.live_prev, out)
+                self.live_prev = out
+            self.emit({"type": "live_translation", "text": out, "stable": stable, "lang": lang})
 
     def _on_final(self, text: str, tagged: str) -> None:
         self.final_id += 1
         fid = self.final_id
         lang = self.resolve_lang(tagged, text)
         needs = bool(lang) and not lang.lower().startswith("en")
-        self.emit({"type": "final", "id": fid, "text": text, "lang": lang, "needs_translation": needs})
+        replaces: list[int] = []
+        frag = self.open_fragment
+        self.open_fragment = None
+        if frag and needs and frag["lang"] == lang and time.monotonic() - frag["t"] <= MERGE_WINDOW_S:
+            # The previous final stopped mid sentence; translate the whole sentence and let this caption replace it.
+            text = join_fragments(frag["text"], text, lang)
+            replaces = [frag["id"]]
+        self.emit({"type": "final", "id": fid, "text": text, "lang": lang, "needs_translation": needs, "replaces": replaces})
         if needs:
+            if not ends_sentence(text) and not replaces:  # one merge at most, so a rambling speaker cannot defer forever
+                self.open_fragment = {"id": fid, "text": text, "lang": lang, "t": time.monotonic()}
             self.inflight += 1
             self.nmt_pool.submit(self._translate, fid, text, lang)
 
@@ -372,6 +521,10 @@ class Server:
                         await asyncio.to_thread(self.engine.stop)
                 elif kind == "ping":
                     await ws.send(json.dumps({"type": "pong", "state": "capturing" if self.engine.proc else "idle"}))
+                elif kind == "config":
+                    if "live_translation" in msg:
+                        self.engine.live_translation = bool(msg["live_translation"])
+                        log.info("live translation %s", "on" if self.engine.live_translation else "off")
         except websockets.ConnectionClosed:
             pass
         finally:
