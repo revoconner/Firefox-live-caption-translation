@@ -42,6 +42,61 @@ CHUNK_MS = 80
 CHUNK_BYTES = RATE * CHUNK_MS // 1000 * 2
 
 
+def nmt_code(lang: str) -> str:
+    """Riva pair tags use bare codes (ja, pt, ko) with a few variants; the runtime rejects forms like pt-PT."""
+    low = lang.lower()
+    if low.startswith("zh"):
+        return "zh-tw" if low.endswith("tw") else "zh"
+    if low in ("nb-no", "nn-no", "nb", "nn"):
+        return "no"
+    return low.split("-")[0]
+
+
+SCRIPT_RANGES = [
+    ("ja", (0x3040, 0x30FF)),
+    ("ko", (0xAC00, 0xD7AF)),
+    ("ko", (0x1100, 0x11FF)),
+    ("zh", (0x4E00, 0x9FFF)),
+    ("cyr", (0x0400, 0x04FF)),
+    ("ar", (0x0600, 0x06FF)),
+    ("th", (0x0E00, 0x0E7F)),
+    ("he", (0x0590, 0x05FF)),
+    ("el", (0x0370, 0x03FF)),
+    ("hi", (0x0900, 0x097F)),
+]
+FAMILY_DEFAULT = {"ja": "ja", "ko": "ko", "zh": "zh", "cyr": "ru", "ar": "ar", "th": "th", "he": "he", "el": "el", "hi": "hi"}
+
+
+def script_family(text: str) -> str:
+    """Which writing system dominates the text. Kana wins over ideographs so Japanese is not mistaken for Chinese."""
+    counts: dict[str, int] = {}
+    for ch in text:
+        o = ord(ch)
+        for fam, (lo, hi) in SCRIPT_RANGES:
+            if lo <= o <= hi:
+                counts[fam] = counts.get(fam, 0) + 1
+                break
+        else:
+            if ch.isalpha():
+                counts["latin"] = counts.get("latin", 0) + 1
+    if not counts:
+        return ""
+    if counts.get("ja") and counts.get("zh"):
+        counts["ja"] += counts.pop("zh")
+    return max(counts, key=counts.get)
+
+
+def lang_family(lang: str) -> str:
+    base = nmt_code(lang)
+    if base in ("ru", "uk", "bg"):
+        return "cyr"
+    if base.startswith("zh"):
+        return "zh"
+    if base in FAMILY_DEFAULT:
+        return base
+    return "latin"
+
+
 def firefox_root_pid() -> int | None:
     """The firefox.exe whose parent is not firefox.exe. Process loopback on it captures the whole tree."""
     for p in psutil.process_iter(["pid", "name", "ppid"]):
@@ -71,6 +126,20 @@ class Engine:
         self.thread: threading.Thread | None = None
         self.stop_flag = threading.Event()
         self.final_id = 0
+        self.last_lang = ""
+
+    def resolve_lang(self, tagged: str, text: str) -> str:
+        """The model only emits its language tag after terminal punctuation, so untagged finals fall back to the last tagged language when the script agrees, else to the script's default language."""
+        if tagged:
+            self.last_lang = tagged
+            return tagged
+        fam = script_family(text)
+        if not fam:
+            return ""
+        last_fam = lang_family(self.last_lang) if self.last_lang else ""
+        if last_fam == fam or (fam == "zh" and last_fam == "ja"):
+            return self.last_lang
+        return FAMILY_DEFAULT.get(fam, "")
 
     def emit(self, msg: dict) -> None:
         self.loop.call_soon_threadsafe(self.events.put_nowait, msg)
@@ -84,6 +153,7 @@ class Engine:
             return
         self.proc = subprocess.Popen([str(CAPTURE_EXE), "--pid", str(pid), "--rate", str(RATE)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         self.stop_flag.clear()
+        self.last_lang = ""
         self.thread = threading.Thread(target=self._asr_loop, name="asr", daemon=True)
         self.thread.start()
         threading.Thread(target=self._drain_stderr, name="capture-stderr", daemon=True).start()
@@ -141,9 +211,10 @@ class Engine:
             if not self.stop_flag.is_set():
                 self.emit({"type": "status", "state": "idle", "detail": "capture ended"})
 
-    def _on_final(self, text: str, lang: str) -> None:
+    def _on_final(self, text: str, tagged: str) -> None:
         self.final_id += 1
         fid = self.final_id
+        lang = self.resolve_lang(tagged, text)
         needs = bool(lang) and not lang.lower().startswith("en")
         self.emit({"type": "final", "id": fid, "text": text, "lang": lang, "needs_translation": needs})
         if needs:
@@ -152,7 +223,7 @@ class Engine:
     def _translate(self, fid: int, text: str, lang: str) -> None:
         t = time.perf_counter()
         try:
-            out = self.nmt.translate([text], lang, "en")[0]
+            out = self.nmt.translate([text], nmt_code(lang), "en")[0]
         except nemo_ffi.NemoError as e:
             log.error("nmt error (%s): %s", lang, e)
             return
