@@ -1,7 +1,3 @@
-# NOTE: This is in active development and not for general public use. No support will be provided for the time being. New issues is likely to be ignored.
-
----
-
 # Firefox real time caption & translation
 
 An extension for firefox and a backend server (windows only) for compute to generate real time captions in English for videos playing in browser.
@@ -15,11 +11,14 @@ An extension for firefox and a backend server (windows only) for compute to gene
 - Server resides in windows tray (WIP)
 
 ## Installation
-1. Download the backend from the release section (LINK IS PENDING) and install it.
-2. Install the extension from the firefox add on page here (LINK IS PENDING). 
-3. Restart browser (recommended but optional)
+1. Download the backend installation files (.exe and .bin files, so 4 files in total) from the release section. (LINK IS PENDING)   
+2. Make sure these files are placed in the same folder. Then run the `LiveCaptionTranslate-Setup-x.x.x.exe` to install the backend. Once installed, you can delete the downloaded files.
+3. Install the extension from the firefox add on page here (LINK IS PENDING). 
+    - If you are using the Firefox Developer Edition, you can also download the extension built file and install it manually. The one in Release section is unsigned, however.
+4. Restart browser (recommended).
 
 ### Important note
+- CUDA GPU needed. CUDA 13 supported GPU recommended. 
 - The extension without the backend won't work since an extension (as far as I know) cannot run CUDA accelarated AI models for processing text streams. 
 - This also means that the extension will not work on incompatible platform like linux, or macOS, although feel free to build your own backend from source. 
 - For a rough idea of build instructions, read the CLAUDE.md but instructions to build from source will not be provided.
