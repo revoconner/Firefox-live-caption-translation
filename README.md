@@ -11,9 +11,9 @@ An extension for firefox and a backend server (windows only) for compute to gene
 - Server resides in windows tray (WIP)
 
 ## Installation
-1. Download the backend installation files (.exe and .bin files, so 4 files in total) from the release section. (LINK IS PENDING)   
+1. Download the backend installation files (.exe and .bin files, so 4 files in total) from the release section. [Firefox Add Ons: Live Caption Video](https://addons.mozilla.org/en-GB/firefox/addon/live-caption-video/) 
 2. Make sure these files are placed in the same folder. Then run the `LiveCaptionTranslate-Setup-x.x.x.exe` to install the backend. Once installed, you can delete the downloaded files.
-3. Install the extension from the firefox add on page here (LINK IS PENDING). 
+3. Install the extension from the firefox add on page here [Releases](https://github.com/revoconner/Firefox-live-caption-translation/releases). 
     - If you are using the Firefox Developer Edition, you can also download the extension built file and install it manually. The one in Release section is unsigned, however.
 4. Restart browser (recommended).
 
