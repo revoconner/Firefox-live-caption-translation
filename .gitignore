@@ -1,0 +1,6 @@
+*.md
+!README.md
+*.code-workspace
+capvenv
+capvenv/*
+nemo-speech-0.1.0*
