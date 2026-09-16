@@ -1,0 +1,18 @@
+# Python backend dependencies. Install into capvenv:
+#   capvenv\Scripts\python.exe -m pip install -r requirements.txt
+# ML inference is served by nemo-speech (separate process), so no torch or NeMo here.
+
+# WebSocket client to nemo-speech /v1/realtime and WebSocket server for the extension
+websockets>=15.0
+
+# HTTP client for nemo-speech /v1/translations and /ready
+httpx>=0.28.0
+
+# PCM16 buffer handling and resampling
+numpy>=2.2.0
+
+# Locate the firefox.exe parent process for WASAPI process loopback capture
+psutil>=7.0.0
+
+# Development only
+pytest>=8.3.0
