@@ -1,4 +1,7 @@
 #lct-overlay {
+    --lct-bg: rgba(0, 0, 0, 0.65);
+    --lct-fg: #fff;
+    --lct-outline: rgba(0, 0, 0, 1);
     position: fixed;
     z-index: 2147483647;
     pointer-events: none;
@@ -12,14 +15,14 @@
     font-family: "Segoe UI", Arial, sans-serif;
     line-height: 1.25;
     text-align: center;
-    color: #fff;
-    text-shadow: 0 0 4px #000, 0 0 2px #000;
+    color: var(--lct-fg);
+    text-shadow: 1px 1px 0 var(--lct-outline), -1px 1px 0 var(--lct-outline), 1px -1px 0 var(--lct-outline), -1px -1px 0 var(--lct-outline), 0 0 3px var(--lct-outline);
 }
 
 #lct-overlay .lct-line,
 #lct-overlay .lct-partial,
 #lct-overlay .lct-status {
-    background: rgba(0, 0, 0, 0.65);
+    background: var(--lct-bg);
     border-radius: 0.2em;
     padding: 0.1em 0.4em;
     max-width: 100%;
@@ -27,11 +30,11 @@
 }
 
 #lct-overlay .lct-pending {
-    color: #ddd;
+    opacity: 0.85;
 }
 
 #lct-overlay .lct-partial {
-    color: #bbb;
+    opacity: 0.85;
     font-style: italic;
 }
 

@@ -122,6 +122,8 @@ Model lifetime (decided 16 Sep 2026): the models are loaded while `firefox.exe` 
 - Firefox suspends the MV3 event page after about 30 s without an extension event, and an open WebSocket does not count as one. The streaming tab's content script sends a `keepalive` message every 10 s, and the enabled tab set is mirrored in `storage.session` so a restarted event page recovers.
 - `tests\extension_background.test.mjs` drives `background.js` against a stubbed WebExtension API and asserts the capture state machine (tab handover, reload, pause debounce, event page restart). Run it with `node tests\extension_background.test.mjs` after touching the background script. It lives outside `extension\` so it is never packaged.
 - Check the extension with `web-ext lint --source-dir extension`. One warning about `strict_min_version` and Firefox for Android is expected and irrelevant to this desktop project.
+- User settings are on the options page in the add-on manager (`options.html`, `options.js`), never a toolbar popup, since the toolbar click toggles the tab. Defaults and normalization live in `settings.js`, shared by the options page and the content script. Add new settings there first.
+- Extension icons are the `icon-*.png` files generated from Rev's `icon.ico`; regenerate with System.Drawing if the artwork changes (see SCRATCHPAD.md for the edge halo caveat).
 
 Model files live in `backend\models`: `nemotron-3.5-asr-streaming-0.6b.q8_0.gguf` (ASR) and `riva-translate-4b-instruct-v2-q8_0.gguf` (NMT, community q8_0 conversion, verified runtime_compatible by `nemo-speech model info`). The `.nemo` archive there is not used by the runtime.
 

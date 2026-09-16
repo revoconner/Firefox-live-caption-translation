@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Live Caption Translate settings</title>
+    <link rel="stylesheet" href="options.css">
+</head>
+<body>
+    <form id="form">
+        <section>
+            <h2>Behaviour</h2>
+            <label class="row"><input type="checkbox" name="showLive"> Show live transcription in progress <span class="hint">The italic line that updates as speech is recognised. Off shows finished lines only.</span></label>
+            <label class="row"><input type="checkbox" name="showUntranslated"> Show untranslated text <span class="hint">Show a finished non English line immediately and replace it when the English arrives. Off waits for the translation.</span></label>
+            <label class="row">Delay before removing a caption <input type="number" name="removeDelayMs" min="0" max="60000" step="50"> ms <span class="hint">Counted from when the line is complete: after its translation, or after the final transcription when none is needed.</span></label>
+        </section>
+        <section>
+            <h2>Appearance</h2>
+            <label class="row">Font size <input type="number" name="fontSize" min="8" max="120" step="1"> px <span class="hint">At a 1280 px wide player. Scales up and down with the player size.</span></label>
+            <label class="row">Font colour <input type="color" name="fontColor"></label>
+            <label class="row">Outline colour <input type="color" name="outlineColor"> opacity <input type="range" name="outlineOpacity" min="0" max="100" step="1"> <output data-for="outlineOpacity"></output>%</label>
+            <label class="row">Background colour <input type="color" name="bgColor"> opacity <input type="range" name="bgOpacity" min="0" max="100" step="1"> <output data-for="bgOpacity"></output>%</label>
+        </section>
+        <section>
+            <h2>Preview</h2>
+            <div id="preview"><div class="lct-line">This is what a finished caption looks like.</div><div class="lct-partial">and the live transcription in progress</div></div>
+        </section>
+        <p class="actions"><button type="button" id="reset">Reset to defaults</button> <span id="saved" class="hint"></span></p>
+    </form>
+    <script src="settings.js"></script>
+    <script src="options.js"></script>
+</body>
+</html>
