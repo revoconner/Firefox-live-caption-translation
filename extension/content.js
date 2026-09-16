@@ -4,6 +4,10 @@
 // (enabled plus foreground). The overlay only draws while streaming. The frame reports whether it has a
 // playing video so the backend can idle when nothing is playing. Appearance and behaviour come from the
 // settings page (settings.js is loaded before this file) and apply live when changed.
+//
+// Display rules: English speech shows its live line (styled like a finished caption) when englishLive is
+// on, and its finished sentences always. Non English speech shows its live line and its not yet translated
+// sentences only when showNativeLive is on; otherwise only the finished English translation appears.
 (() => {
     if (window.__liveCaptionLoaded) return;
     window.__liveCaptionLoaded = true;
@@ -22,12 +26,15 @@
     let linesEl = null;
     let statusEl = null;
     let finals = []; // {id, text, translation, needs_translation, timer, replacedBy}
-    let partial = "";
-    let live = null; // {text, stable, lang} English for the in progress line, when the speech is not English
+    let partial = null; // {text, lang}
     let tick = null;
     let keepalive = null;
     let quietTimer = null;
     let reportedPlaying = false;
+
+    function isEnglish(lang) {
+        return !lang || lang.toLowerCase().startsWith("en");
+    }
 
     function ensureOverlay() {
         if (overlay) return;
@@ -74,8 +81,7 @@
 
     function setStatus(text) {
         if (!statusEl) return;
-        statusEl.textContent = text;
-        statusEl.style.display = text ? "" : "none";
+        statusEl.textContent = text || "";
     }
 
     // A final is complete once it has its translation, or immediately when none is needed.
@@ -89,26 +95,20 @@
             const r = finals.find((x) => x.id === f.replacedBy);
             return !r || !visible(r);
         }
-        return isComplete(f) || settings.showUntranslated;
+        return isComplete(f) || settings.showNativeLive;
     }
 
     function renderPartial() {
-        const useLive = settings.liveTranslation && live && partial;
-        const useSource = settings.showLive && partial;
-        if (useLive) {
-            const stable = document.createElement("span");
-            stable.textContent = live.stable;
-            const rest = document.createElement("span");
-            rest.className = "lct-unstable";
-            rest.textContent = live.text.slice(live.stable.length);
-            partialEl.replaceChildren(stable, rest);
-            partialEl.style.display = "";
-        } else if (useSource) {
-            partialEl.textContent = partial;
-            partialEl.style.display = "";
-        } else {
+        if (!partial || !partial.text) {
             partialEl.textContent = "";
-            partialEl.style.display = "none";
+            return;
+        }
+        if (isEnglish(partial.lang)) {
+            partialEl.className = settings.englishLive ? "lct-line" : "lct-partial";
+            partialEl.textContent = settings.englishLive ? partial.text : "";
+        } else {
+            partialEl.className = "lct-partial";
+            partialEl.textContent = settings.showNativeLive ? partial.text : "";
         }
     }
 
@@ -164,7 +164,7 @@
         quietTimer = null;
         for (const f of finals) clearTimeout(f.timer);
         finals = [];
-        live = null;
+        partial = null;
     }
 
     // Once a merged caption is complete, the fragments it replaced go immediately.
@@ -230,7 +230,6 @@
         streaming = on;
         if (on) {
             clearFinals();
-            partial = "";
             ensureOverlay();
             render();
             position();
@@ -238,7 +237,6 @@
         } else {
             if (keepalive) { clearInterval(keepalive); keepalive = null; }
             clearFinals();
-            partial = "";
             removeOverlay();
         }
     }
@@ -261,20 +259,13 @@
                 break;
             case "partial":
                 if (!streaming) return;
-                partial = msg.text;
-                touch();
-                render();
-                break;
-            case "live_translation":
-                if (!streaming) return;
-                live = { text: msg.text, stable: msg.stable, lang: msg.lang };
+                partial = { text: msg.text, lang: msg.lang || "" };
                 touch();
                 render();
                 break;
             case "final": {
                 if (!streaming) return;
-                partial = "";
-                live = null;
+                partial = null;
                 const f = { id: msg.id, text: msg.text, lang: msg.lang, needs_translation: msg.needs_translation, translation: null, timer: null, replacedBy: null };
                 for (const id of msg.replaces || []) {
                     const g = finals.find((x) => x.id === id);

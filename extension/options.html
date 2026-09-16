@@ -9,9 +9,8 @@
     <form id="form">
         <section>
             <h2>Behaviour</h2>
-            <label class="row"><input type="checkbox" name="showLive"> Show live transcription in progress <span class="hint">The italic line that updates as speech is recognised. Off shows finished lines only.</span></label>
-            <label class="row"><input type="checkbox" name="liveTranslation"> Translate the live line as it goes <span class="hint">For non English speech the italic line shows English while the sentence is still being spoken. Words that have settled are bright, the still changing tail is dimmed. Japanese and Korean rewrite themselves more, since their verbs come last.</span></label>
-            <label class="row"><input type="checkbox" name="showUntranslated"> Show untranslated text <span class="hint">Show a finished non English line immediately and replace it when the English arrives. Off waits for the translation.</span></label>
+            <label class="row"><input type="checkbox" name="showNativeLive"> Show live transcription in the original language for non English speech <span class="hint">On: the italic line updates in the spoken language, and each finished sentence appears in that language until its English replaces it. Off: only the finished English translation is shown.</span></label>
+            <label class="row"><input type="checkbox" name="englishLive"> Show live transcription for English speech <span class="hint">On: the line grows as the words are recognised, styled like a finished caption. Off: each sentence appears only once it is finished.</span></label>
             <label class="row">Delay before removing a caption <input type="number" name="removeDelayMs" min="0" max="60000" step="50"> ms <span class="hint">Counted from when the line is complete: after its translation, or after the final transcription when none is needed.</span></label>
         </section>
         <section>
@@ -23,7 +22,7 @@
         </section>
         <section>
             <h2>Preview</h2>
-            <div id="preview"><div class="lct-line">This is what a finished caption looks like.</div><div class="lct-partial">and the live transcription in progress</div></div>
+            <div id="preview"><div class="lct-line">This is what a finished caption looks like.</div><div class="lct-partial">and a live line in the original language</div></div>
         </section>
         <p class="actions"><button type="button" id="reset">Reset to defaults</button> <span id="saved" class="hint"></span></p>
     </form>

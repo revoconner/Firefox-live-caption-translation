@@ -1,9 +1,8 @@
 // Shared between the options page and the content script: default settings and helpers.
 const LCT_DEFAULTS = {
-    showLive: true,          // show the italic in progress transcription
-    liveTranslation: true,   // translate the in progress line as it grows, shown in place of the source partial
-    showUntranslated: false, // show a finalised non English line before its translation arrives
-    removeDelayMs: 500,      // how long a completed caption stays after its audio ended
+    showNativeLive: false,   // non English speech: show the live line and unfinished translations in the source language
+    englishLive: true,       // English speech: show the live line, styled like a finished caption
+    removeDelayMs: 500,      // how long a completed caption stays after it was superseded or the speech stopped
     bgColor: "#000000",
     bgOpacity: 65,           // percent
     fontSize: 24,            // px at a 1280 px wide player, scales with the player
@@ -20,10 +19,12 @@ function lctHexToRgba(hex, opacityPercent) {
 }
 
 function lctNormalize(raw) {
-    const s = { ...LCT_DEFAULTS, ...(raw || {}) };
-    s.showLive = !!s.showLive;
-    s.liveTranslation = !!s.liveTranslation;
-    s.showUntranslated = !!s.showUntranslated;
+    const s = { ...LCT_DEFAULTS };
+    for (const k of Object.keys(LCT_DEFAULTS)) {
+        if (raw && raw[k] !== undefined) s[k] = raw[k];
+    }
+    s.showNativeLive = !!s.showNativeLive;
+    s.englishLive = !!s.englishLive;
     s.removeDelayMs = Math.max(0, Math.min(60000, Number(s.removeDelayMs) || 0));
     s.fontSize = Math.max(8, Math.min(120, Number(s.fontSize) || LCT_DEFAULTS.fontSize));
     s.bgOpacity = Math.max(0, Math.min(100, Number(s.bgOpacity)));

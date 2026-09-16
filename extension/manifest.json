@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Live Caption Translate",
-    "version": "0.1.5",
+    "version": "0.1.6",
     "description": "Local real time captions with English translation for videos playing in this tab.",
     "browser_specific_settings": {
         "gecko": {

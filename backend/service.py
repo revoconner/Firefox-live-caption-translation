@@ -87,6 +87,40 @@ def looks_complete(text: str) -> bool:
     return len(last) > 1 and last not in ABBREVIATIONS
 
 
+def split_complete_sentences(text: str) -> tuple[list[str], str]:
+    """Split off every sentence that is finished and already followed by more speech. Returns the finished sentences and the remainder still in progress."""
+    done: list[str] = []
+    rest = text
+    while True:
+        cut = -1
+        for i, ch in enumerate(rest):
+            if ch not in TERMINAL_PUNCT:
+                continue
+            head = rest[: i + 1]
+            after = rest[i + 1:]
+            if trailing_ellipsis(head) or (i + 1 < len(rest) and rest[i + 1] in TERMINAL_PUNCT):
+                continue  # inside an ellipsis or a run of punctuation like ?!
+            if not after.strip():
+                break  # nothing spoken after it yet, the pause rule handles this case
+            cjk = script_family(head) in ("ja", "zh", "ko", "th")
+            if not cjk and not after[0].isspace():
+                continue  # decimal point or similar
+            if looks_complete(head):
+                cut = i + 1
+                break
+        if cut < 0:
+            return done, rest
+        done.append(rest[:cut].strip())
+        rest = rest[cut:].lstrip()
+
+
+def common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return n
+
+
 def join_fragments(a: str, b: str, lang: str) -> str:
     a = strip_ellipsis(a)
     if nmt_code(lang) in NO_SPACE_LANGS:
@@ -202,6 +236,7 @@ class Engine:
         self.live_prev = ""  # previous live output for the current utterance, for the stable prefix
         self.utt_seq = 0
         self.open_fragment: dict | None = None  # a final without terminal punctuation waiting to be merged
+        self.stream_active = False  # a recognition stream exists; unloading the models under it would crash the runtime
         threading.Thread(target=self._watch_firefox, name="firefox-watch", daemon=True).start()
         threading.Thread(target=self._live_worker, name="live-nmt", daemon=True).start()
 
@@ -231,7 +266,7 @@ class Engine:
     def _unload(self) -> bool:
         if self.rec is None:
             return True
-        if self.proc is not None or self.inflight:
+        if self.proc is not None or self.inflight or self.stream_active:
             return False
         if self.nmt:
             self.nmt.close()
@@ -360,10 +395,15 @@ class Engine:
         """Feed PCM16 chunks from read_exact into one recognition stream until it returns short. Separate from the capture process so tests can drive it from a file."""
         rec = self.rec
         assert rec is not None
+        self.stream_active = True
         stream = rec.stream(language="auto", interim=True)
-        last_partial = ""
-        partial_since = 0.0
-        forced_for = ""
+        # Sentence level finals are cut from the text, not the audio: the recogniser runs on undisturbed while finished
+        # sentences are emitted as finals as soon as the next word appears (or after a short pause), and the runtime's
+        # own final at the next silence only contributes whatever was not emitted yet. Tokens are never retracted, so
+        # the committed text stays a prefix of what the runtime reports.
+        committed = ""
+        last_rest = ""
+        rest_since = 0.0
         try:
             while not self.stop_flag.is_set():
                 buf = read_exact(CHUNK_BYTES)
@@ -373,22 +413,54 @@ class Engine:
                 stream.push(np.ascontiguousarray(samples), RATE)
                 for r in stream.drain():
                     text = r.text.strip()
+                    tagged = r.languages[0] if r.languages else ""
                     if r.final:
-                        last_partial = ""
-                        forced_for = ""
+                        rest = self._remainder(committed, text)
+                        committed = ""
+                        last_rest = ""
                         self._end_utterance()
-                        if text:
-                            self._on_final(text, r.languages[0] if r.languages else "")
-                    elif text and text != last_partial:
-                        last_partial = text
-                        partial_since = time.monotonic()
-                        self._on_partial(text)
-                # Punctuation aware endpointing: a sentence that has visibly ended is cut now instead of after the full silence threshold.
-                if last_partial and last_partial != forced_for and looks_complete(last_partial) and time.monotonic() - partial_since >= FORCE_EOU_S:
-                    forced_for = last_partial
-                    stream.force_endpoint()
+                        if rest:
+                            self._on_final(rest, tagged)
+                        elif tagged:
+                            self.last_lang = tagged
+                        continue
+                    if not text:
+                        continue
+                    rest = self._remainder(committed, text)
+                    if self.infer_lang(rest):  # unknown language means wait for the runtime's tagged final
+                        done, rest = split_complete_sentences(rest)
+                        for sentence in done:
+                            committed = text[: text.index(sentence, len(committed)) + len(sentence)]
+                            self._end_utterance()
+                            self._on_final(sentence, "")
+                            last_rest = ""
+                    if rest != last_rest:
+                        last_rest = rest
+                        rest_since = time.monotonic()
+                        if rest:
+                            self._on_partial(rest)
+                # A finished sentence with nothing after it yet becomes a final after a short pause rather than after the full silence threshold.
+                if last_rest and looks_complete(last_rest) and self.infer_lang(last_rest) and time.monotonic() - rest_since >= FORCE_EOU_S:
+                    committed = committed + (" " if committed else "") + last_rest if committed else last_rest
+                    self._end_utterance()
+                    self._on_final(last_rest, "")
+                    last_rest = ""
         finally:
             stream.close()
+            self.stream_active = False
+
+    @staticmethod
+    def _remainder(committed: str, text: str) -> str:
+        """The part of the runtime's text that has not been emitted as a sentence final yet."""
+        if not committed:
+            return text
+        if text.startswith(committed):
+            return text[len(committed):].strip()
+        n = common_prefix_len(committed, text)
+        if n >= len(committed) - 3:  # the runtime touched up the tail, for example added an ellipsis
+            return text[len(committed):].strip()
+        log.warning("runtime revised committed text, showing the divergent tail: %r vs %r", committed[:40], text[:40])
+        return text[n:].strip()
 
     def _end_utterance(self) -> None:
         with self.live_cv:
@@ -397,10 +469,10 @@ class Engine:
             self.live_prev = ""
 
     def _on_partial(self, text: str) -> None:
-        self.emit({"type": "partial", "text": text})
+        lang = self.infer_lang(text)
+        self.emit({"type": "partial", "text": text, "lang": lang})
         if not self.live_translation or self.nmt is None:
             return
-        lang = self.infer_lang(text)
         if not lang or lang.lower().startswith("en"):
             return
         with self.live_cv:

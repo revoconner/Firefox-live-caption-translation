@@ -29,6 +29,12 @@
     white-space: pre-wrap;
 }
 
+#lct-overlay .lct-line:empty,
+#lct-overlay .lct-partial:empty,
+#lct-overlay .lct-status:empty {
+    display: none;
+}
+
 #lct-overlay .lct-pending {
     opacity: 0.85;
 }
@@ -36,10 +42,6 @@
 #lct-overlay .lct-partial {
     opacity: 0.85;
     font-style: italic;
-}
-
-#lct-overlay .lct-unstable {
-    opacity: 0.55;
 }
 
 #lct-overlay .lct-status {
