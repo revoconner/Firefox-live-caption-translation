@@ -1,0 +1,41 @@
+#lct-overlay {
+    position: fixed;
+    z-index: 2147483647;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.15em;
+    padding: 0 4%;
+    box-sizing: border-box;
+    font-family: "Segoe UI", Arial, sans-serif;
+    line-height: 1.25;
+    text-align: center;
+    color: #fff;
+    text-shadow: 0 0 4px #000, 0 0 2px #000;
+}
+
+#lct-overlay .lct-line,
+#lct-overlay .lct-partial,
+#lct-overlay .lct-status {
+    background: rgba(0, 0, 0, 0.65);
+    border-radius: 0.2em;
+    padding: 0.1em 0.4em;
+    max-width: 100%;
+    white-space: pre-wrap;
+}
+
+#lct-overlay .lct-pending {
+    color: #ddd;
+}
+
+#lct-overlay .lct-partial {
+    color: #bbb;
+    font-style: italic;
+}
+
+#lct-overlay .lct-status {
+    font-size: 0.6em;
+    color: #ffb74d;
+}

@@ -1,0 +1,34 @@
+{
+    "manifest_version": 3,
+    "name": "Live Caption Translate",
+    "version": "0.1.0",
+    "description": "Local real time captions with English translation for videos playing in this tab.",
+    "browser_specific_settings": {
+        "gecko": {
+            "id": "ff-livecapt-trans@revoconner",
+            "strict_min_version": "140.0",
+            "data_collection_permissions": {
+                "required": ["none"]
+            }
+        }
+    },
+    "permissions": ["tabs", "storage"],
+    "action": {
+        "default_title": "Live captions: click to toggle for this tab"
+    },
+    "background": {
+        "scripts": ["background.js"]
+    },
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["content.js"],
+            "css": ["overlay.css"],
+            "run_at": "document_idle",
+            "all_frames": true
+        }
+    ],
+    "content_security_policy": {
+        "extension_pages": "script-src 'self'; connect-src 'self' ws://127.0.0.1:*; object-src 'self'"
+    }
+}

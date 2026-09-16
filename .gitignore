@@ -5,3 +5,4 @@ capvenv
 capvenv/*
 nemo-speech-0.1.0*
 backend/models
+extension/web-ext-artifacts
